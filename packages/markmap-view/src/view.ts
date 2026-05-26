@@ -69,6 +69,8 @@ export class Markmap {
 
   private _disposeList: (() => void)[] = [];
 
+  private _sideMap = new Map<number, 'left' | 'right'>();
+
   constructor(
     svg: string | SVGElement | ID3SVGElement,
     opts?: Partial<IMarkmapOptions>,
@@ -159,6 +161,13 @@ export class Markmap {
     await this.renderData(data);
   }
 
+  async toggleSide(data: INode, side: 'left' | 'right') {
+    const foldKey = side === 'left' ? 'foldLeft' : 'foldRight';
+    const current = data.payload?.[foldKey] as number | undefined;
+    data.payload = { ...data.payload, [foldKey]: current ? 0 : 1 };
+    await this.renderData(data);
+  }
+
   handleClick = (e: MouseEvent, d: INode) => {
     let recursive = this.options.toggleRecursively;
     if (isMacintosh ? e.metaKey : e.ctrlKey) recursive = !recursive;
@@ -209,6 +218,17 @@ export class Markmap {
       depth -= 1;
     });
 
+    if (this.options.bidirectional) {
+      this._sideMap.clear();
+      (node as INode).children?.forEach((child, i) => {
+        const side: 'left' | 'right' = i % 2 !== 0 ? 'left' : 'right';
+        walkTree(child, (item, next) => {
+          this._sideMap.set(item.state.id, side);
+          next();
+        });
+      });
+    }
+
     return node as INode;
   }
 
@@ -226,45 +246,123 @@ export class Markmap {
         d.state.size = newSize;
       });
 
-    const { lineWidth, paddingX, spacingHorizontal, spacingVertical } =
-      this.options;
-    const layout = flextree<INode>({})
-      .children((d) => {
-        if (!d.payload?.fold) return d.children;
-      })
-      .nodeSize((node) => {
-        const [width, height] = node.data.state.size;
-        return [height, width + (width ? paddingX * 2 : 0) + spacingHorizontal];
-      })
-      .spacing((a, b) => {
-        return (
-          (a.parent === b.parent ? spacingVertical : spacingVertical * 2) +
-          lineWidth(a.data)
-        );
+    const {
+      lineWidth,
+      paddingX,
+      spacingHorizontal,
+      spacingVertical,
+      bidirectional,
+    } = this.options;
+
+    const makeLayout = () =>
+      flextree<INode>({})
+        .children((d) => {
+          if (!d.payload?.fold) return d.children;
+        })
+        .nodeSize((node) => {
+          const [width, height] = node.data.state.size;
+          return [
+            height,
+            width + (width ? paddingX * 2 : 0) + spacingHorizontal,
+          ];
+        })
+        .spacing((a, b) => {
+          return (
+            (a.parent === b.parent ? spacingVertical : spacingVertical * 2) +
+            lineWidth(a.data)
+          );
+        });
+
+    if (!bidirectional) {
+      const layout = makeLayout();
+      const tree = layout.hierarchy(this.state.data);
+      layout(tree);
+      const fnodes = tree.descendants();
+      fnodes.forEach((fnode) => {
+        fnode.data.state.rect = {
+          x: fnode.y,
+          y: fnode.x - fnode.xSize / 2,
+          width: fnode.ySize - spacingHorizontal,
+          height: fnode.xSize,
+        };
       });
-    const tree = layout.hierarchy(this.state.data);
-    layout(tree);
-    const fnodes = tree.descendants();
-    fnodes.forEach((fnode) => {
-      const node = fnode.data;
-      node.state.rect = {
+      this.state.rect = {
+        x1: min(fnodes, (fnode) => fnode.data.state.rect.x) || 0,
+        y1: min(fnodes, (fnode) => fnode.data.state.rect.y) || 0,
+        x2:
+          max(
+            fnodes,
+            (fnode) => fnode.data.state.rect.x + fnode.data.state.rect.width,
+          ) || 0,
+        y2:
+          max(
+            fnodes,
+            (fnode) => fnode.data.state.rect.y + fnode.data.state.rect.height,
+          ) || 0,
+      };
+      return;
+    }
+
+    // Bidirectional layout: even-indexed children go right, odd go left
+    const root = this.state.data;
+    const allChildren = root.children ?? [];
+    const rightChildren = root.payload?.foldRight
+      ? []
+      : allChildren.filter((_, i) => i % 2 === 0);
+    const leftChildren = root.payload?.foldLeft
+      ? []
+      : allChildren.filter((_, i) => i % 2 !== 0);
+
+    // Right side: standard layout
+    root.children = rightChildren;
+    const rightLayout = makeLayout();
+    const rightTree = rightLayout.hierarchy(root);
+    rightLayout(rightTree);
+    const rightFnodes = rightTree.descendants();
+    rightFnodes.forEach((fnode) => {
+      fnode.data.state.rect = {
         x: fnode.y,
         y: fnode.x - fnode.xSize / 2,
         width: fnode.ySize - spacingHorizontal,
         height: fnode.xSize,
       };
     });
+
+    // Left side: mirrored layout
+    // For a left node at fnode.y: rect.x = rootYSize - fnode.y - fnode.ySize
+    // This places children to the left of the root (x < 0), preserving the gap.
+    let leftFnodes: typeof rightFnodes = [];
+    if (leftChildren.length > 0) {
+      root.children = leftChildren;
+      const leftLayout = makeLayout();
+      const leftTree = leftLayout.hierarchy(root);
+      leftLayout(leftTree);
+      const rootYSize = leftTree.ySize;
+      leftFnodes = leftTree.descendants().filter((f) => f.depth > 0);
+      leftFnodes.forEach((fnode) => {
+        fnode.data.state.rect = {
+          x: rootYSize - fnode.y - fnode.ySize,
+          y: fnode.x - fnode.xSize / 2,
+          width: fnode.ySize - spacingHorizontal,
+          height: fnode.xSize,
+        };
+      });
+    }
+
+    root.children = allChildren;
+
+    const allFnodes = [...rightFnodes, ...leftFnodes];
     this.state.rect = {
-      x1: min(fnodes, (fnode) => fnode.data.state.rect.x) || 0,
-      y1: min(fnodes, (fnode) => fnode.data.state.rect.y) || 0,
+      x1: min(allFnodes, (fnode) => fnode.data.state.rect.x) || 0,
+      y1: min(allFnodes, (fnode) => fnode.data.state.rect.y) || 0,
       x2:
         max(
-          fnodes,
+          allFnodes,
           (fnode) => fnode.data.state.rect.x + fnode.data.state.rect.width,
         ) || 0,
       y2:
         max(
-          fnodes,
+          allFnodes,
           (fnode) => fnode.data.state.rect.y + fnode.data.state.rect.height,
         ) || 0,
     };
@@ -323,6 +421,14 @@ export class Markmap {
     const parentMap: Record<number, number> = {};
     const nodes: INode[] = [];
     walkTree(rootNode, (item, next, parent) => {
+      if (this.options.bidirectional && parent === rootNode) {
+        const side = this._sideMap.get(item.state.id);
+        const isFolded =
+          side === 'left'
+            ? rootNode.payload?.foldLeft
+            : rootNode.payload?.foldRight;
+        if (isFolded) return;
+      }
       if (!item.payload?.fold) next();
       nodeMap[item.state.id] = item;
       if (parent) parentMap[item.state.id] = parent.state.id;
@@ -404,31 +510,65 @@ export class Markmap {
       .attr('stroke-width', 0);
     const mmLineMerge = mmLine.merge(mmLineEnter);
 
-    // Circle to link to children of the node
+    // Circle to link to children of the node.
+    // In bidirectional mode the root gets two circles (one per side); all other nodes get one.
+    type ICircleData = { node: INode; side: 'left' | 'right' | null };
+    const getCircleData = (d: INode): ICircleData[] => {
+      if (!d.children?.length) return [];
+      if (this.options.bidirectional && !this._sideMap.has(d.state.id)) {
+        return [
+          { node: d, side: 'right' },
+          { node: d, side: 'left' },
+        ];
+      }
+      return [{ node: d, side: this._sideMap.get(d.state.id) ?? null }];
+    };
     const mmCircle = mmGMerge
       .selectAll<
         SVGCircleElement,
-        INode
+        ICircleData
       >(childSelector<SVGCircleElement>('circle'))
       .data(
-        (d) => (d.children?.length ? [d] : []),
-        (d) => d.state.key,
+        getCircleData,
+        (d) => d.node.state.key + (d.side ? `-${d.side}` : ''),
       );
     const mmCircleEnter = mmCircle
       .enter()
       .append('circle')
       .attr('stroke-width', 0)
       .attr('r', 0)
-      .on('click', (e, d) => this.handleClick(e, d))
+      .on('click', (e, d) => {
+        const isRootSide =
+          this.options.bidirectional &&
+          !this._sideMap.has(d.node.state.id) &&
+          d.side !== null;
+        if (isRootSide) {
+          this.toggleSide(d.node, d.side as 'left' | 'right');
+        } else {
+          let recursive = this.options.toggleRecursively;
+          if (isMacintosh ? e.metaKey : e.ctrlKey) recursive = !recursive;
+          this.toggleNode(d.node, recursive);
+        }
+      })
       .on('mousedown', stopPropagation);
     const mmCircleMerge = mmCircleEnter
       .merge(mmCircle)
-      .attr('stroke', (d) => color(d))
-      .attr('fill', (d) =>
-        d.payload?.fold && d.children
-          ? color(d)
-          : 'var(--markmap-circle-open-bg)',
-      );
+      .attr('stroke', (d) => color(d.node))
+      .attr('fill', (d) => {
+        if (
+          this.options.bidirectional &&
+          !this._sideMap.has(d.node.state.id) &&
+          d.side !== null
+        ) {
+          const foldKey = d.side === 'left' ? 'foldLeft' : 'foldRight';
+          return d.node.payload?.[foldKey]
+            ? color(d.node)
+            : 'var(--markmap-circle-open-bg)';
+        }
+        return d.node.payload?.fold && d.node.children
+          ? color(d.node)
+          : 'var(--markmap-circle-open-bg)';
+      });
 
     const observer = this._observer;
     const mmFo = mmGMerge
@@ -470,11 +610,18 @@ export class Markmap {
     const mmFoMerge = mmFoEnter.merge(mmFo);
 
     // Update the links
-    const links = nodes.flatMap((node) =>
-      node.payload?.fold
-        ? []
-        : node.children.map((child) => ({ source: node, target: child })),
-    );
+    const links = nodes.flatMap((node) => {
+      if (node.payload?.fold) return [];
+      if (this.options.bidirectional && !this._sideMap.has(node.state.id)) {
+        return (node.children ?? []).flatMap((child) => {
+          const side = this._sideMap.get(child.state.id);
+          const isFolded =
+            side === 'left' ? node.payload?.foldLeft : node.payload?.foldRight;
+          return isFolded ? [] : [{ source: node, target: child }];
+        });
+      }
+      return node.children.map((child) => ({ source: node, target: child }));
+    });
     const mmPath = this.g
       .selectAll<
         SVGPathElement,
@@ -490,8 +637,12 @@ export class Markmap {
       .attr('data-path', (d) => d.target.state.path)
       .attr('d', (d) => {
         const originRect = getOriginSourceRect(d.target);
+        const isLeft =
+          this.options.bidirectional &&
+          this._sideMap.get(d.target.state.id) === 'left';
+        const edgeX = isLeft ? originRect.x : originRect.x + originRect.width;
         const pathOrigin: [number, number] = [
-          originRect.x + originRect.width,
+          edgeX,
           originRect.y + originRect.height,
         ];
         return linkShape({ source: pathOrigin, target: pathOrigin });
@@ -518,14 +669,22 @@ export class Markmap {
 
     mmGEnter.attr('transform', (d) => {
       const originRect = getOriginSourceRect(d);
-      return `translate(${originRect.x + originRect.width - d.state.rect.width},${
-        originRect.y + originRect.height - d.state.rect.height
-      })`;
+      const isLeft =
+        this.options.bidirectional && this._sideMap.get(d.state.id) === 'left';
+      const x = isLeft
+        ? originRect.x
+        : originRect.x + originRect.width - d.state.rect.width;
+      return `translate(${x},${originRect.y + originRect.height - d.state.rect.height})`;
     });
     this.transition(mmGExit)
       .attr('transform', (d) => {
         const targetRect = getOriginTargetRect(d);
-        const targetX = targetRect.x + targetRect.width - d.state.rect.width;
+        const isLeft =
+          this.options.bidirectional &&
+          this._sideMap.get(d.state.id) === 'left';
+        const targetX = isLeft
+          ? targetRect.x
+          : targetRect.x + targetRect.width - d.state.rect.width;
         const targetY = targetRect.y + targetRect.height - d.state.rect.height;
         return `translate(${targetX},${targetY})`;
       })
@@ -554,13 +713,13 @@ export class Markmap {
       .attr('stroke', (d) => color(d))
       .attr('stroke-width', lineWidth);
 
-    const mmCircleExit = mmGExit.selectAll<SVGCircleElement, INode>(
+    const mmCircleExit = mmGExit.selectAll<SVGCircleElement, any>(
       childSelector<SVGCircleElement>('circle'),
     );
     this.transition(mmCircleExit).attr('r', 0).attr('stroke-width', 0);
     mmCircleMerge
-      .attr('cx', (d) => d.state.rect.width)
-      .attr('cy', (d) => d.state.rect.height + lineWidth(d) / 2);
+      .attr('cx', (d) => (d.side === 'left' ? 0 : d.node.state.rect.width))
+      .attr('cy', (d) => d.node.state.rect.height + lineWidth(d.node) / 2);
     this.transition(mmCircleMerge).attr('r', 6).attr('stroke-width', '1.5');
 
     this.transition(mmFoExit).style('opacity', 0);
@@ -572,8 +731,12 @@ export class Markmap {
     this.transition(mmPathExit)
       .attr('d', (d) => {
         const targetRect = getOriginTargetRect(d.target);
+        const isLeft =
+          this.options.bidirectional &&
+          this._sideMap.get(d.target.state.id) === 'left';
+        const edgeX = isLeft ? targetRect.x : targetRect.x + targetRect.width;
         const pathTarget: [number, number] = [
-          targetRect.x + targetRect.width,
+          edgeX,
           targetRect.y + targetRect.height + lineWidth(d.target) / 2,
         ];
         return linkShape({ source: pathTarget, target: pathTarget });
@@ -587,14 +750,21 @@ export class Markmap {
       .attr('d', (d) => {
         const origSource = d.source;
         const origTarget = d.target;
+        const isLeft =
+          this.options.bidirectional &&
+          this._sideMap.get(origTarget.state.id) === 'left';
         const source: [number, number] = [
-          origSource.state.rect.x + origSource.state.rect.width,
+          isLeft
+            ? origSource.state.rect.x
+            : origSource.state.rect.x + origSource.state.rect.width,
           origSource.state.rect.y +
             origSource.state.rect.height +
             lineWidth(origSource) / 2,
         ];
         const target: [number, number] = [
-          origTarget.state.rect.x,
+          isLeft
+            ? origTarget.state.rect.x + origTarget.state.rect.width
+            : origTarget.state.rect.x,
           origTarget.state.rect.y +
             origTarget.state.rect.height +
             lineWidth(origTarget) / 2,
