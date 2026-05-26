@@ -14,6 +14,7 @@ export const lineWidthFactory =
 
 export const defaultOptions: IMarkmapOptions = {
   autoFit: false,
+  bidirectional: false,
   duration: 500,
   embedGlobalCSS: true,
   fitRatio: 0.95,
