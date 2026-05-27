@@ -218,18 +218,21 @@ export class Markmap {
       depth -= 1;
     });
 
-    if (this.options.bidirectional) {
-      this._sideMap.clear();
-      (node as INode).children?.forEach((child, i) => {
-        const side: 'left' | 'right' = i % 2 !== 0 ? 'left' : 'right';
-        walkTree(child, (item, next) => {
-          this._sideMap.set(item.state.id, side);
-          next();
-        });
-      });
-    }
+    this._rebuildSideMap(node as INode);
 
     return node as INode;
+  }
+
+  private _rebuildSideMap(root: INode = this.state.data!) {
+    this._sideMap.clear();
+    if (!this.options.bidirectional) return;
+    root.children?.forEach((child, i) => {
+      const side: 'left' | 'right' = i % 2 !== 0 ? 'left' : 'right';
+      walkTree(child, (item, next) => {
+        this._sideMap.set(item.state.id, side);
+        next();
+      });
+    });
   }
 
   private _relayout() {
@@ -417,6 +420,8 @@ export class Markmap {
     const rootNode = this.state.data;
     if (!rootNode) return;
 
+    this._rebuildSideMap(rootNode);
+
     const nodeMap: Record<number, INode> = {};
     const parentMap: Record<number, number> = {};
     const nodes: INode[] = [];
@@ -532,6 +537,7 @@ export class Markmap {
         getCircleData,
         (d) => d.node.state.key + (d.side ? `-${d.side}` : ''),
       );
+    mmCircle.exit().remove();
     const mmCircleEnter = mmCircle
       .enter()
       .append('circle')

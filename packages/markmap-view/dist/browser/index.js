@@ -1032,15 +1032,14 @@
       await this.renderData(data);
     }
     _initializeData(node) {
-      var _a;
       let nodeId = 0;
       const { color, initialExpandLevel } = this.options;
       let foldRecursively = 0;
       let depth = 0;
       walkTree(node, (item, next, parent) => {
-        var _a2, _b, _c, _d;
+        var _a, _b, _c, _d;
         depth += 1;
-        item.children = (_a2 = item.children) == null ? void 0 : _a2.map((child) => ({ ...child }));
+        item.children = (_a = item.children) == null ? void 0 : _a.map((child) => ({ ...child }));
         nodeId += 1;
         item.state = {
           ...item.state,
@@ -1067,17 +1066,20 @@
         if (isFoldRecursively) foldRecursively -= 1;
         depth -= 1;
       });
-      if (this.options.bidirectional) {
-        this._sideMap.clear();
-        (_a = node.children) == null ? void 0 : _a.forEach((child, i) => {
-          const side = i % 2 !== 0 ? "left" : "right";
-          walkTree(child, (item, next) => {
-            this._sideMap.set(item.state.id, side);
-            next();
-          });
-        });
-      }
+      this._rebuildSideMap(node);
       return node;
+    }
+    _rebuildSideMap(root = this.state.data) {
+      var _a;
+      this._sideMap.clear();
+      if (!this.options.bidirectional) return;
+      (_a = root.children) == null ? void 0 : _a.forEach((child, i) => {
+        const side = i % 2 !== 0 ? "left" : "right";
+        walkTree(child, (item, next) => {
+          this._sideMap.set(item.state.id, side);
+          next();
+        });
+      });
     }
     _relayout() {
       var _a, _b;
@@ -1229,6 +1231,7 @@
       const { paddingX, autoFit, color, maxWidth, lineWidth } = this.options;
       const rootNode = this.state.data;
       if (!rootNode) return;
+      this._rebuildSideMap(rootNode);
       const nodeMap = {};
       const parentMap = {};
       const nodes = [];
@@ -1300,6 +1303,7 @@
         getCircleData,
         (d) => d.node.state.key + (d.side ? `-${d.side}` : "")
       );
+      mmCircle.exit().remove();
       const mmCircleEnter = mmCircle.enter().append("circle").attr("stroke-width", 0).attr("r", 0).on("click", (e, d) => {
         const isRootSide = this.options.bidirectional && !this._sideMap.has(d.node.state.id) && d.side !== null;
         if (isRootSide) {
